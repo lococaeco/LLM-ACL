@@ -1,249 +1,493 @@
 """
-커스텀 콜백 모듈
-RL 학습 중 LLM을 호출하여 Robustness 제어를 수행하는 콜백들을 제공합니다.
+ALRT (Adaptive LLM-Guided Robustness Training) 콜백
+- 확장된 메트릭 수집 (reward trend, learning phase, robustness score 등)
+- 주기적 강건성 평가
+- LLM에게 풍부한 상태 정보 제공
 """
+
+import time
+from collections import deque
+from typing import Any, Dict, List, Optional, Callable
 
 import numpy as np
 import wandb
-import time
 from stable_baselines3.common.callbacks import BaseCallback
-from llm_core import LLMDecider
+
+from llm_core.decider import LLMDecider
 
 
-class LLMControlCallback(BaseCallback):
+class ALRTCallback(BaseCallback):
     """
-    학습 중 주기적으로 LLM을 호출하여 Action Dropout Mask를 업데이트하는 콜백
-
-    이 콜백은 학습 진행 상황(보상, 손실 등)을 텍스트로 요약하여 LLM에 전달하고,
-    반환된 마스크를 환경 래퍼에 적용하여 에이전트의 Robustness를 동적으로 제어합니다.
+    ALRT 메인 콜백: 에이전트 상태 분석 + LLM 의사결정 + 래퍼 플랜 적용
+    
+    확장된 메트릭:
+    - reward_trend: increasing/stable/decreasing/plateau
+    - learning_phase: early/mid/late
+    - robustness_score: 교란 환경에서의 상대적 성능
+    - state_coverage: 방문한 상태 다양성
     """
-
-    def __init__(self, wrapper, llm_decider: LLMDecider, update_freq: int = 1000, verbose: int = 0):
-        """
-        LLMControlCallback 초기화
-
-        Args:
-            wrapper: 업데이트할 LLMGuidedRobustnessWrapper 객체
-            llm_decider (LLMDecider): LLM 의사결정 객체
-            update_freq (int): LLM 호출 주기 (스텝 단위)
-            verbose (int): 상세 출력 레벨
-        """
+    
+    def __init__(
+        self,
+        wrapper,
+        llm_decider: LLMDecider,
+        curriculum_cfg,
+        env_spec: Dict[str, Any],
+        base_env_fn: Callable = None,  # 강건성 평가용 환경 생성 함수
+        target_reward: float = 3000.0,
+        total_timesteps: int = 1000000,
+        use_llm: bool = True,
+        verbose: int = 0,
+    ):
         super().__init__(verbose)
         self.wrapper = wrapper
         self.llm_decider = llm_decider
-        self.update_freq = update_freq
-        self.last_update = 0
-        self.rewards = []  # 최근 보상 기록
-        self.losses = []   # 최근 손실 기록
+        self.cfg = curriculum_cfg
+        self.env_spec = env_spec
+        self.use_llm = use_llm
+        self.base_env_fn = base_env_fn
+        self.target_reward = target_reward
+        self.total_timesteps_target = total_timesteps
+        
+        # 에피소드 히스토리
+        self.window = deque(maxlen=int(curriculum_cfg.window_size))
+        
+        # 현재 에피소드 상태
+        self.current_reward = 0.0
+        self.current_length = 0
+        self.current_stage = int(curriculum_cfg.initial_stage)
+        self.current_mode = "maintain"  # boost/maintain/perturb
+        
+        # ALRT 설정
+        self.alrt_config = dict(curriculum_cfg.get("alrt", {}))
+        self.fail_threshold = float(curriculum_cfg.reward_failure_threshold)
+        self.safety_clip = dict(curriculum_cfg.safety_clip)
+        
+        # 강건성 평가 관련
+        self.robustness_eval_freq = self.alrt_config.get("robustness_eval_freq", 20)
+        self.robustness_eval_episodes = self.alrt_config.get("robustness_eval_episodes", 3)
+        self.last_robustness_score = 1.0
+        self.episode_count = 0
+        
+        # 트렌드 분석용
+        self.reward_history = deque(maxlen=50)
 
     def _on_step(self) -> bool:
-        """
-        각 스텝마다 호출되는 메서드
-        보상과 손실을 기록하고, 주기마다 LLM을 호출하여 마스크를 업데이트합니다.
-
-        Returns:
-            bool: 학습 계속 여부
-        """
-        # 보상 기록 (가능한 경우)
-        if 'rewards' in self.locals:
-            self.rewards.extend(self.locals['rewards'])
-
-        # 손실 기록 (가능한 경우)
-        if 'loss' in self.locals:
-            self.losses.append(self.locals['loss'])
-
-        # 업데이트 주기 확인 및 LLM 호출
-        if self.num_timesteps - self.last_update >= self.update_freq:
-            self._update_mask()
-            self.last_update = self.num_timesteps
-
+        """매 스텝마다 호출"""
+        # 보상/길이 누적
+        if "rewards" in self.locals:
+            self.current_reward += float(self.locals["rewards"][0])
+            self.current_length += 1
+        
+        # 에피소드 종료 처리
+        if "dones" in self.locals and self.locals["dones"][0]:
+            self._on_episode_end()
+        
         return True
 
-    def _update_mask(self):
-        """
-        현재 학습 상태를 요약하여 LLM에 전달하고, 반환된 마스크로 래퍼를 업데이트합니다.
-        """
-        # 학습 상태 텍스트 요약
-        avg_reward = np.mean(self.rewards[-1000:]) if self.rewards else 0.0
-        avg_loss = np.mean(self.losses[-100:]) if self.losses else 0.0
+    def _on_episode_end(self) -> None:
+        """에피소드 종료 시 처리"""
+        self.episode_count += 1
+        
+        # 에피소드 기록
+        fail = self.current_reward < self.fail_threshold
+        self.window.append({
+            "reward": self.current_reward,
+            "length": self.current_length,
+            "fail": fail,
+            "timestep": self.num_timesteps,
+        })
+        self.reward_history.append(self.current_reward)
+        
+        # wandb 로깅
+        if wandb.run is not None:
+            wandb.log({
+                "episode_reward": self.current_reward,
+                "episode_length": self.current_length,
+                "curriculum_stage": self.current_stage,
+                "alrt_mode": self.current_mode,
+                "timesteps": self.num_timesteps,
+            })
+        
+        # 주기적 강건성 평가
+        if self.episode_count % self.robustness_eval_freq == 0:
+            self._evaluate_robustness()
+        
+        # 주기적 LLM 의사결정
+        if self.cfg.enabled and self.episode_count % int(self.cfg.llm_update_freq) == 0:
+            summary = self._build_extended_summary()
+            plan = self._request_plan(summary)
+            self.wrapper.apply_plan(plan)
+            self.current_stage = plan.get("stage", self.current_stage)
+            self.current_mode = plan.get("mode", "maintain")
+            
+            if wandb.run is not None:
+                wandb.log({
+                    "alrt_mode": self.current_mode,
+                    "curriculum_stage": self.current_stage,
+                    "robustness_score": self.last_robustness_score,
+                    "reward_trend": summary.get("reward_trend", "unknown"),
+                    "learning_phase": summary.get("learning_phase", "unknown"),
+                    "plan_source": plan.get("source", "llm"),
+                    "timesteps": self.num_timesteps,
+                })
+        
+        # 상태 초기화
+        self.current_reward = 0.0
+        self.current_length = 0
 
-        state_text = f"""
-                            RL 에이전트 학습 상태:
-                            - 평균 보상 (최근 1000개): {avg_reward:.2f}
-                            - 평균 손실 (최근 100개): {avg_loss:.4f}
-                            - 총 학습 스텝: {self.num_timesteps}
-                            - 현재 에피소드: {self.n_calls if hasattr(self, 'n_calls') else '알 수 없음'}
-                    """
+    def _build_extended_summary(self) -> Dict[str, Any]:
+        """LLM에 전달할 확장된 상태 요약 생성"""
+        
+        rewards = [e["reward"] for e in self.window]
+        lengths = [e["length"] for e in self.window]
+        fails = [e["fail"] for e in self.window]
+        
+        # 기본 통계
+        mean_reward = float(np.mean(rewards)) if rewards else 0.0
+        std_reward = float(np.std(rewards)) if rewards else 0.0
+        median_reward = float(np.median(rewards)) if rewards else 0.0
+        fail_rate = float(np.mean(fails)) if fails else 0.0
+        
+        # 트렌드 분석
+        reward_trend = self._analyze_reward_trend()
+        
+        # 학습 단계 판단
+        learning_phase = self._determine_learning_phase()
+        
+        # 상태 커버리지 (래퍼에서 가져옴)
+        state_coverage = getattr(self.wrapper, "get_state_coverage", lambda: 0.5)()
+        
+        # 정책 엔트로피 (가능한 경우)
+        policy_entropy = self._get_policy_entropy()
+        
+        # 목표 대비 진행률
+        reward_ratio = mean_reward / self.target_reward if self.target_reward > 0 else 0.0
+        
+        return {
+            # 기본 정보
+            "env_name": self.env_spec.get("env_name", "unknown"),
+            "window_size": len(self.window),
+            "total_episodes": self.episode_count,
+            "current_stage": self.current_stage,
+            "current_mode": self.current_mode,
+            
+            # 보상 통계
+            "mean_reward": mean_reward,
+            "median_reward": median_reward,
+            "std_reward": std_reward,
+            "min_reward": float(np.min(rewards)) if rewards else 0.0,
+            "max_reward": float(np.max(rewards)) if rewards else 0.0,
+            "fail_rate": fail_rate,
+            
+            # 목표 대비 진행률
+            "target_reward": self.target_reward,
+            "reward_ratio": reward_ratio,
+            
+            # 학습 동역학
+            "reward_trend": reward_trend,
+            "learning_phase": learning_phase,
+            "policy_entropy": policy_entropy,
+            
+            # 강건성 정보
+            "robustness_score": self.last_robustness_score,
+            
+            # 탐험 정보
+            "state_coverage": state_coverage,
+            "mean_episode_length": float(np.mean(lengths)) if lengths else 0.0,
+            
+            # 최근 보상 (LLM이 패턴 파악용)
+            "recent_rewards": list(rewards)[-10:] if rewards else [],
+        }
 
-        # LLM을 통한 마스크 결정
-        action_dim = self.wrapper.action_dim
-        mask = self.llm_decider.decide_action_dropout(state_text, action_dim)
+    def _analyze_reward_trend(self) -> str:
+        """보상 트렌드 분석: increasing/stable/decreasing/plateau"""
+        
+        if len(self.reward_history) < 10:
+            return "unknown"
+        
+        recent = list(self.reward_history)
+        n = len(recent)
+        
+        # 선형 회귀로 기울기 계산
+        x = np.arange(n)
+        slope = np.polyfit(x, recent, 1)[0]
+        
+        # 최근 vs 이전 비교
+        mid = n // 2
+        recent_mean = np.mean(recent[mid:])
+        earlier_mean = np.mean(recent[:mid])
+        
+        # 변화율
+        if earlier_mean != 0:
+            change_rate = (recent_mean - earlier_mean) / abs(earlier_mean)
+        else:
+            change_rate = 0
+        
+        # 분산으로 안정성 체크
+        recent_std = np.std(recent[-10:])
+        mean_val = np.mean(recent[-10:])
+        cv = recent_std / abs(mean_val) if mean_val != 0 else 0  # 변동계수
+        
+        # 판단
+        if abs(change_rate) < 0.05 and cv < 0.15:
+            return "plateau"
+        elif slope > 0 and change_rate > 0.1:
+            return "increasing"
+        elif slope < 0 and change_rate < -0.1:
+            return "decreasing"
+        else:
+            return "stable"
 
-        # 래퍼에 마스크 적용
-        self.wrapper.update_mask(mask)
+    def _determine_learning_phase(self) -> str:
+        """학습 단계 판단: early/mid/late"""
+        progress = self.num_timesteps / self.total_timesteps_target
+        
+        if progress < 0.2:
+            return "early"
+        elif progress < 0.7:
+            return "mid"
+        else:
+            return "late"
 
-        # 상세 출력
-        if self.verbose > 0:
-            print(f"[LLM 콜백] 마스크 업데이트: {mask}")
-            print(f"[LLM 콜백] 상태 요약: 평균 보상={avg_reward:.2f}, 평균 손실={avg_loss:.4f}")
+    def _get_policy_entropy(self) -> float:
+        """정책 엔트로피 추출 (가능한 경우)"""
+        try:
+            if hasattr(self.model, "ent_coef"):
+                return float(self.model.ent_coef)
+        except Exception:
+            pass
+        return -1.0
+
+    def _evaluate_robustness(self) -> None:
+        """강건성 평가: 교란 환경에서 현재 정책 성능 측정"""
+        
+        if self.base_env_fn is None:
+            self.last_robustness_score = 0.5
+            return
+        
+        try:
+            eval_env = self.base_env_fn()
+            
+            perturbation_scenarios = [
+                {"type": "obs_noise", "value": 0.15},
+                {"type": "action_noise", "value": 0.1},
+            ]
+            
+            normal_rewards = []
+            perturbed_rewards = []
+            
+            # 정상 환경에서 평가
+            for _ in range(self.robustness_eval_episodes):
+                obs, _ = eval_env.reset()
+                episode_reward = 0
+                done = False
+                while not done:
+                    action, _ = self.model.predict(obs, deterministic=True)
+                    obs, reward, terminated, truncated, _ = eval_env.step(action)
+                    episode_reward += reward
+                    done = terminated or truncated
+                normal_rewards.append(episode_reward)
+            
+            # 교란 환경에서 평가
+            for scenario in perturbation_scenarios:
+                for _ in range(self.robustness_eval_episodes):
+                    obs, _ = eval_env.reset()
+                    episode_reward = 0
+                    done = False
+                    while not done:
+                        action, _ = self.model.predict(obs, deterministic=True)
+                        
+                        if scenario["type"] == "obs_noise":
+                            obs = obs + np.random.normal(0, scenario["value"], obs.shape)
+                        elif scenario["type"] == "action_noise":
+                            action = action + np.random.normal(0, scenario["value"], action.shape)
+                        
+                        obs, reward, terminated, truncated, _ = eval_env.step(action)
+                        episode_reward += reward
+                        done = terminated or truncated
+                    
+                    perturbed_rewards.append(episode_reward)
+            
+            eval_env.close()
+            
+            normal_mean = np.mean(normal_rewards) if normal_rewards else 1.0
+            perturbed_mean = np.mean(perturbed_rewards) if perturbed_rewards else 0.0
+            
+            if normal_mean > 0:
+                self.last_robustness_score = min(1.0, max(0.0, perturbed_mean / normal_mean))
+            else:
+                self.last_robustness_score = 0.5
+            
+            if self.verbose:
+                print(f"\n[ALRT] 강건성 평가: normal={normal_mean:.1f}, perturbed={perturbed_mean:.1f}, "
+                      f"score={self.last_robustness_score:.2f}")
+                
+        except Exception as e:
+            print(f"[ALRT] 강건성 평가 실패: {e}")
+            self.last_robustness_score = 0.5
+
+    def _request_plan(self, summary: Dict[str, Any]) -> Dict[str, Any]:
+        """LLM에게 플랜 요청"""
+        
+        if not self.use_llm:
+            plan = self.llm_decider._mock_plan(
+                summary,
+                self.cfg.max_plan_horizon,
+                self.cfg.max_stage,
+                self.alrt_config,
+            )
+            plan["source"] = "mock"
+            return plan
+        
+        return self.llm_decider.decide_curriculum(
+            summary=summary,
+            env_spec=self.env_spec,
+            stage=self.current_stage,
+            safety_clip=self.safety_clip,
+            max_horizon=int(self.cfg.max_plan_horizon),
+            max_stage=int(self.cfg.max_stage),
+            alrt_config=self.alrt_config,
+        )
+
+
+# Legacy alias
+LLMCurriculumCallback = ALRTCallback
 
 
 class WandbLoggingCallback(BaseCallback):
-    """
-    wandb에 학습 메트릭을 기록하는 콜백
-    """
-
+    """wandb에 기본 메트릭을 기록하는 콜백"""
+    
     def __init__(self, log_freq: int = 1000, verbose: int = 0):
-        """
-        WandbLoggingCallback 초기화
-
-        Args:
-            log_freq (int): 로그 기록 주기 (스텝 단위)
-            verbose (int): 상세 출력 레벨
-        """
         super().__init__(verbose)
         self.log_freq = log_freq
-        self.episode_rewards = []
-        self.episode_lengths = []
+        self.episode_rewards = deque(maxlen=100)
+        self.episode_lengths = deque(maxlen=100)
         self.current_episode_reward = 0
         self.current_episode_length = 0
 
     def _on_step(self) -> bool:
-        """
-        각 스텝마다 호출되는 메서드
-        지정된 주기마다 메트릭을 wandb에 기록합니다.
-
-        Returns:
-            bool: 학습 계속 여부
-        """
-        # 스텝별 보상 누적
-        if 'rewards' in self.locals and len(self.locals['rewards']) > 0:
-            self.current_episode_reward += self.locals['rewards'][0]
+        if "rewards" in self.locals:
+            self.current_episode_reward += self.locals["rewards"][0]
             self.current_episode_length += 1
 
-        # 에피소드 종료 시 기록
-        if 'dones' in self.locals and len(self.locals['dones']) > 0 and self.locals['dones'][0]:
+        if "dones" in self.locals and self.locals["dones"][0]:
             self.episode_rewards.append(self.current_episode_reward)
             self.episode_lengths.append(self.current_episode_length)
-            
-            # wandb에 에피소드 보상 기록
             wandb.log({
-                'episode_reward': self.current_episode_reward,
-                'episode_length': self.current_episode_length,
-                'timesteps': self.num_timesteps
+                "episode_reward": self.current_episode_reward,
+                "episode_length": self.current_episode_length,
+                "timesteps": self.num_timesteps,
             })
-            
-            # 초기화
             self.current_episode_reward = 0
             self.current_episode_length = 0
 
-        # 로그 주기마다 추가 메트릭 기록
         if self.num_timesteps % self.log_freq == 0:
             self._log_metrics()
-
         return True
 
     def _log_metrics(self):
-        """
-        현재 메트릭을 wandb에 기록합니다.
-        """
-        metrics = {
-            'timesteps': self.num_timesteps,
-        }
-
-        # 평균 메트릭 계산 및 기록
+        metrics = {"timesteps": self.num_timesteps}
         if self.episode_rewards:
-            metrics['avg_reward'] = np.mean(self.episode_rewards[-10:])  # 최근 10개 에피소드 평균
-        if self.episode_lengths:
-            metrics['avg_episode_length'] = np.mean(self.episode_lengths[-10:])
-
-        # 학습 관련 메트릭 (가능한 경우)
-        if 'loss' in self.locals:
-            metrics['loss'] = self.locals['loss']
-
-        # wandb에 기록
+            metrics["avg_reward_100ep"] = np.mean(self.episode_rewards)
+            metrics["avg_len_100ep"] = np.mean(self.episode_lengths)
         wandb.log(metrics)
-
-        if self.verbose > 0:
-            print(f"[Wandb] 메트릭 기록: {metrics}")
 
 
 class ProgressCallback(BaseCallback):
-    """
-    학습 진행 상황을 시각적으로 표시하는 콜백
-    """
-
+    """학습 진행률/ETA를 출력하는 콜백"""
+    
     def __init__(self, total_timesteps: int, update_freq: int = 1000, verbose: int = 1):
-        """
-        ProgressCallback 초기화
-
-        Args:
-            total_timesteps (int): 총 학습 스텝 수
-            update_freq (int): 진행 상황 업데이트 주기
-            verbose (int): 상세 출력 레벨
-        """
         super().__init__(verbose)
         self.total_timesteps = total_timesteps
         self.update_freq = update_freq
         self.start_time = time.time()
-        self.last_update_time = self.start_time
-        self.last_timesteps = 0
 
     def _on_step(self) -> bool:
-        """
-        각 스텝마다 호출되는 메서드
-        진행 상황을 계산하여 출력합니다.
-
-        Returns:
-            bool: 학습 계속 여부
-        """
         if self.num_timesteps % self.update_freq == 0:
             self._print_progress()
-        
         return True
 
     def _print_progress(self):
-        """
-        현재 진행 상황을 계산하여 출력합니다.
-        """
-        current_time = time.time()
-        elapsed_time = current_time - self.start_time
-        progress = self.num_timesteps / self.total_timesteps
-        
-        # 예상 남은 시간 계산
+        elapsed = time.time() - self.start_time
+        progress = self.num_timesteps / self.total_timesteps if self.total_timesteps else 0
+        bar_len = 30
+        filled = int(bar_len * progress)
+        bar = "█" * filled + "░" * (bar_len - filled)
+
         if self.num_timesteps > 0:
-            avg_time_per_step = elapsed_time / self.num_timesteps
-            remaining_steps = self.total_timesteps - self.num_timesteps
-            eta = avg_time_per_step * remaining_steps
+            eta = elapsed / self.num_timesteps * max(self.total_timesteps - self.num_timesteps, 0)
         else:
             eta = 0
-        
-        # 진행 바 생성
-        bar_length = 40
-        filled_length = int(bar_length * progress)
-        bar = '█' * filled_length + '░' * (bar_length - filled_length)
-        
-        # 시간 포맷팅
-        elapsed_str = self._format_time(elapsed_time)
-        eta_str = self._format_time(eta)
-        
-        # 출력
-        progress_str = (
-            f"\r진행률: [{bar}] {progress:.1%} "
-            f"({self.num_timesteps}/{self.total_timesteps}) "
-            f"경과시간: {elapsed_str} | 예상남은시간: {eta_str}"
+
+        print(
+            f"\rProgress: [{bar}] {progress:.1%} ({self.num_timesteps}/{self.total_timesteps}) "
+            f"| Time: {self._fmt(elapsed)} | ETA: {self._fmt(eta)}",
+            end="",
+            flush=True,
         )
-        
-        print(progress_str, end='', flush=True)
-        
-        # 100% 완료 시 줄바꿈
         if self.num_timesteps >= self.total_timesteps:
             print()
 
-    def _format_time(self, seconds: float) -> str:
-        """
-        시간을 hh:mm:ss 형식으로 포맷팅합니다.
-        """
-        hours, remainder = divmod(int(seconds), 3600)
-        minutes, seconds = divmod(remainder, 60)
-        return "02d"
+    def _fmt(self, seconds: float) -> str:
+        m, s = divmod(int(seconds), 60)
+        h, m = divmod(m, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+class StandardADRCallback(BaseCallback):
+    """
+    Standard ADR 콜백.
+    주기적으로 성능을 체크하고, 목표 성능을 달성하면 랜덤화 범위(phi)를 확장합니다.
+    """
+    def __init__(
+        self,
+        env,
+        update_freq: int = 2048,
+        threshold: float = 0.8,
+        target_reward: float = 1000.0,
+        verbose: int = 0
+    ):
+        super().__init__(verbose)
+        self.env_wrapper = env  # StandardADRWrapper 인스턴스
+        self.update_freq = update_freq  # 업데이트 주기 (스텝 수)
+        self.threshold_ratio = threshold  # 목표 보상 대비 비율 (예: 0.8)
+        self.target_reward = target_reward  # 목표 보상 절대값 (train.py에서 전달받음)
+        
+        self.reward_buffer = deque(maxlen=50)  # 최근 보상 저장용 버퍼
+        self.last_update_step = 0
+        self.current_reward = 0.0
+
+    def _on_step(self) -> bool:
+        # 보상 수집
+        if "rewards" in self.locals:
+             self.current_reward += float(self.locals["rewards"][0])
+
+        # 에피소드 종료 시 버퍼에 추가
+        if "dones" in self.locals and self.locals["dones"][0]:
+            self.reward_buffer.append(self.current_reward)
+            self.current_reward = 0.0
+            
+        # 주기적으로 업데이트 체크
+        if self.num_timesteps - self.last_update_step >= self.update_freq:
+            self.last_update_step = self.num_timesteps
+            
+            if len(self.reward_buffer) > 0:
+                mean_reward = np.mean(self.reward_buffer)
+                target = self.target_reward * self.threshold_ratio
+                
+                # 평균 보상이 목표치를 넘으면 범위 확장
+                if mean_reward >= target:
+                    self.env_wrapper.expand_bounds()
+                    if self.verbose > 0:
+                        print(f"[ADR] 성능 달성 ({mean_reward:.2f} >= {target:.2f}). 범위를 확장합니다.")
+                
+                # WandB 로깅
+                if wandb.run is not None:
+                    wandb.log({
+                        "adr/phi": self.env_wrapper.get_phi(),
+                        "adr/mean_reward": mean_reward,
+                        "adr/target_threshold": target
+                    }, step=self.num_timesteps)
+                    
+        return True

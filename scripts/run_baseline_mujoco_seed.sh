@@ -15,34 +15,35 @@ seeds=(1 123 456 789)
 # 환경 배열
 environments=("mujoco" "hopper" "ant" "humanoid" "lunarlander")
 
+# 알고리즘 배열
+models=("sac" "ppo" "td3" "a2c")
+
+# GPU 배열 (시드 순서대로 매핑)
+gpus=(3 5 6 7)
+
 # 각 환경에 대해 반복
 for env in "${environments[@]}"; do
     echo "=== $env 환경 학습 시작 ==="
 
-    # 각 시드에 대해 반복
-    for seed in "${seeds[@]}"; do
-        echo "시드 $seed 로 학습 시작"
+    # 각 알고리즘에 대해 반복
+    for model in "${models[@]}"; do
+        echo "=== $model 알고리즘 학습 시작 ==="
 
-        # 각 알고리즘을 병렬로 실행 (GPU 3,5,6,7)
-        echo "SAC 알고리즘 - $env (GPU 3, 시드 $seed)"
-        CUDA_VISIBLE_DEVICES=3 python rl_modules/train.py agent=sac env=$env llm_enabled=false seed=$seed &
+        # 4개의 시드를 병렬로 실행 (GPU 3,5,6,7)
+        for i in "${!seeds[@]}"; do
+            seed=${seeds[$i]}
+            gpu=${gpus[$i]}
+            
+            echo "$model 알고리즘 - $env (GPU $gpu, 시드 $seed)"
+            CUDA_VISIBLE_DEVICES=$gpu python rl_modules/train.py agent=$model env=$env llm_enabled=false seed=$seed &
+        done
 
-        echo "PPO 알고리즘 - $env (GPU 5, 시드 $seed)"
-        CUDA_VISIBLE_DEVICES=5 python rl_modules/train.py agent=ppo env=$env llm_enabled=false seed=$seed &
-
-        echo "TD3 알고리즘 - $env (GPU 6, 시드 $seed)"
-        CUDA_VISIBLE_DEVICES=6 python rl_modules/train.py agent=td3 env=$env llm_enabled=false seed=$seed &
-
-        echo "A2C 알고리즘 - $env (GPU 7, 시드 $seed)"
-        CUDA_VISIBLE_DEVICES=7 python rl_modules/train.py agent=a2c env=$env llm_enabled=false seed=$seed &
-
-        # 현재 시드의 모든 알고리즘 학습 완료 대기
+        # 현재 모델의 모든 시드 학습 완료 대기
         wait
-
-        echo "시드 $seed 학습 완료"
+        echo "$model 알고리즘 학습 완료"
     done
 
-    echo "=== $env 환경 모든 시드 학습 완료 ==="
+    echo "=== $env 환경 모든 모델 학습 완료 ==="
 done
 
 echo "=== 모든 베이스라인 학습 완료 ==="

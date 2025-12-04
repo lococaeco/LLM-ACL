@@ -5,6 +5,7 @@ defaults:
   - agent: sac  # 기본 에이전트로 SAC 사용
   - env: mujoco  # 기본 환경으로 MuJoCo 사용
   - llm: default  # 기본 LLM 설정 사용
+  - curriculum: default  # 커리큘럼/교란 설정
 
 # 전역 설정
 seed: 42  # 재현성을 위한 시드 값
@@ -16,3 +17,11 @@ device: "auto"  # 학습 디바이스 (auto, cuda, cuda:0, cpu 등)
 
 # LLM 활성화 여부 (baseline 실험 시 false로 설정)
 llm_enabled: true
+
+# Standard ADR 설정
+adr:
+  enabled: false
+  update_freq: 2048
+  threshold: 0.8
+  expand_rate: 0.05
+  initial_range: 0.0
