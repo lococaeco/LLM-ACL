@@ -1,0 +1,35 @@
+# A2C (Advantage Actor-Critic) 에이전트 설정
+# 기본 하이퍼파라미터 값들
+
+# 알고리즘 이름
+algorithm: "a2c"
+
+# 학습률
+learning_rate: 7e-4
+
+# 스텝 수
+n_steps: 5
+
+# 할인 계수
+gamma: 0.99
+
+# GAE 람다
+gae_lambda: 1.0
+
+# 엔트로피 계수
+ent_coef: 0.0
+
+# 가치 함수 계수
+vf_coef: 0.5
+
+# 최대 그래디언트 노름
+max_grad_norm: 0.5
+
+# RMSProp 엡실론
+rms_prop_eps: 1e-5
+
+# RMSProp 사용 여부
+use_rms_prop: true
+
+# 어드밴티지 정규화
+normalize_advantage: false

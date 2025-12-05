@@ -1,0 +1,41 @@
+# PPO (Proximal Policy Optimization) 에이전트 설정
+# 기본 하이퍼파라미터 값들
+
+# 알고리즘 이름
+algorithm: "ppo"
+
+# 학습률
+learning_rate: 3e-4
+
+# 스텝 수 (롤아웃 길이)
+n_steps: 2048
+
+# 배치 크기
+batch_size: 64
+
+# 에폭 수
+n_epochs: 10
+
+# 할인 계수
+gamma: 0.99
+
+# GAE 람다
+gae_lambda: 0.95
+
+# 정책 클립 범위
+clip_range: 0.2
+
+# 가치 함수 클립 범위
+clip_range_vf: null
+
+# 어드밴티지 정규화
+normalize_advantage: true
+
+# 엔트로피 계수
+ent_coef: 0.0
+
+# 가치 함수 계수
+vf_coef: 0.5
+
+# 최대 그래디언트 노름
+max_grad_norm: 0.5
