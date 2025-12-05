@@ -21,11 +21,12 @@ if [ $# -eq 0 ]; then
     echo ""
     echo "선택 인자:"
     echo "  --episodes      평가 에피소드 수 (기본: 5)"
-    echo "  --render_video  비디오 녹화 활성화"
+    echo "  --render_video  비디오 녹화 활성화 => ssh 서버에선 불가"
     echo "  --video_folder  비디오 저장 폴더 (기본: 모델폴더/videos)"
     echo ""
     echo "예시:"
-    echo "  $0 --model_path outputs/HalfCheetah-v4/sac/20251205_120000/final_model.zip --env_name HalfCheetah-v4 --render_video"
+    echo "  $0 --model_path outputs/HalfCheetah-v4/sac/20251205_120000/final_model --env_name HalfCheetah-v4 --render_video"
+    echo "  $0 --model_path outputs/HalfCheetah-v4/sac/20251205_120000/checkpoint_500000_steps --env_name HalfCheetah-v4 --render_video"
     exit 1
 fi
 
