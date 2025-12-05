@@ -8,7 +8,6 @@ import random
 import torch
 from .loader import LLMLoader
 
-
 class LLMDecider:
     """
     LLM을 사용하여 RL 에이전트의 Action Dropout Mask를 결정하는 클래스
@@ -92,7 +91,7 @@ class LLMDecider:
             list[int]: 파싱된 마스크 또는 기본값
         """
         # 정규식으로 [1,0,1,1] 형식의 리스트 찾기
-        match = re.search(r'\[([01](?:,\s*[01])*\)]', response)
+        match = re.search(r'\[([01](?:,\s*[01])*)\]', response)
 
         if match:
             mask_str = match.group(0)
@@ -100,7 +99,8 @@ class LLMDecider:
                 # 문자열을 리스트로 변환 (주의: eval 사용은 보안상 위험할 수 있음)
                 mask = eval(mask_str)
                 # 유효성 검증
-                if (len(mask) == action_dim and
+                if (isinstance(mask, list) and
+                    len(mask) == action_dim and
                     all(isinstance(x, int) and x in [0, 1] for x in mask)):
                     return mask
             except (ValueError, SyntaxError):

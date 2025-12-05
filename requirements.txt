@@ -8,6 +8,7 @@ gymnasium
 transformers
 accelerate
 bitsandbytes
+vllm
 
 # 실험 추적
 wandb

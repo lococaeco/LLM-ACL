@@ -6,6 +6,7 @@ set -euo pipefail
 
 # Python 경로 설정
 export PYTHONPATH="/home/mlic/mingukang/DL_Project:$PYTHONPATH"
+export PYTHONPATH="/home/mlic/sangwoo/DL_Project:$PYTHONPATH"
 
 # GPU 설정 (필요시 변경: 0, 1, 또는 all)
 export CUDA_VISIBLE_DEVICES=0
@@ -21,7 +22,7 @@ python rl_modules/train.py agent=ppo env=lunarlander llm_enabled=true llm.mock=t
 
 # 실제 LLM 사용 예시 (모델이 설치된 경우)
 # echo "3. SAC + 실제 LLM - MuJoCo (HalfCheetah-v4)"
-# python rl_modules/train.py agent=sac env=mujoco llm.mock=false llm.model_name="microsoft/DialoGPT-medium"
+# python rl_modules/train.py agent=sac env=mujoco llm.mock=false llm.model_name="meta-llama/Meta-Llama-3-8B-Instruct"
 
 # 4bit 양자화 사용 예시
 # echo "4. PPO + 4bit 양자화 LLM - LunarLander-v2"
