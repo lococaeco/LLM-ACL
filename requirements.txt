@@ -1,0 +1,16 @@
+# RL 및 머신러닝 관련 패키지
+torch
+stable-baselines3
+shimmy
+gymnasium
+
+# LLM 관련 패키지
+transformers
+accelerate
+bitsandbytes
+
+# 실험 추적
+wandb
+
+# 설정 관리
+hydra-core

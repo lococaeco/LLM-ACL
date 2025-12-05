@@ -1,0 +1,18 @@
+# 메인 하이드라 설정 파일
+# 기본 설정을 지정하여 다른 구성 파일들을 포함
+
+defaults:
+  - agent: sac  # 기본 에이전트로 SAC 사용
+  - env: mujoco  # 기본 환경으로 MuJoCo 사용
+  - llm: default  # 기본 LLM 설정 사용
+
+# 전역 설정
+seed: 42  # 재현성을 위한 시드 값
+total_timesteps: 1000000  # 총 학습 스텝 수
+eval_freq: 10000  # 평가 빈도
+checkpoint_freq: 500000  # 체크포인트 저장 빈도
+log_interval: 1000  # 로그 간격
+device: "auto"  # 학습 디바이스 (auto, cuda, cuda:0, cpu 등)
+
+# LLM 활성화 여부 (baseline 실험 시 false로 설정)
+llm_enabled: true
