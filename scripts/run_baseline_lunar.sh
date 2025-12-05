@@ -12,19 +12,6 @@ export CUDA_VISIBLE_DEVICES=4,5
 
 echo "=== 베이스라인 RL 학습 시작 ==="
 
-# MuJoCo 환경 (HalfCheetah-v4)에서 각 알고리즘 학습
-# echo "1. SAC 알고리즘 - MuJoCo (HalfCheetah-v4)"
-# python rl_modules/train.py agent=sac env=mujoco llm_enabled=false
-
-# echo "2. PPO 알고리즘 - MuJoCo (HalfCheetah-v4)"
-# python rl_modules/train.py agent=ppo env=mujoco llm_enabled=false
-
-# echo "3. TD3 알고리즘 - MuJoCo (HalfCheetah-v4)"
-# python rl_modules/train.py agent=td3 env=mujoco llm_enabled=false
-
-# echo "4. A2C 알고리즘 - MuJoCo (HalfCheetah-v4)"
-# python rl_modules/train.py agent=a2c env=mujoco llm_enabled=false
-
 # LunarLander 환경에서 각 알고리즘 학습
 echo "5. SAC 알고리즘 - LunarLanderContinuous-v3"
 python rl_modules/train.py agent=sac env=lunarlander llm_enabled=false
