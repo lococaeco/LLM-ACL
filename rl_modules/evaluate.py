@@ -9,7 +9,7 @@ import numpy as np
 from stable_baselines3 import SAC, PPO, TD3, A2C
 from gymnasium.wrappers import RecordVideo
 
-from .utils import make_env
+from rl_modules.utils import make_env
 
 
 def evaluate_model(model_path: str, env_name: str, episodes: int = 5, render_video: bool = False, video_folder: str = None):
@@ -23,22 +23,22 @@ def evaluate_model(model_path: str, env_name: str, episodes: int = 5, render_vid
         render_video (bool): 비디오 녹화 여부
         video_folder (str): 비디오 저장 폴더 (None이면 모델 폴더에 저장)
     """
-    # 모델 파일에서 알고리즘 추론 (파일명에 알고리즘 포함 가정)
-    model_filename = os.path.basename(model_path)
-    if "sac" in model_filename.lower():
+    # 모델 파일에서 알고리즘 추론 (경로에 알고리즘 포함 가정)
+    model_path_lower = model_path.lower()
+    if "sac" in model_path_lower:
         algorithm = "sac"
         model_class = SAC
-    elif "ppo" in model_filename.lower():
+    elif "ppo" in model_path_lower:
         algorithm = "ppo"
         model_class = PPO
-    elif "td3" in model_filename.lower():
+    elif "td3" in model_path_lower:
         algorithm = "td3"
         model_class = TD3
-    elif "a2c" in model_filename.lower():
+    elif "a2c" in model_path_lower:
         algorithm = "a2c"
         model_class = A2C
     else:
-        raise ValueError(f"모델 파일명에서 알고리즘을 추론할 수 없습니다: {model_filename}")
+        raise ValueError(f"모델 경로에서 알고리즘을 추론할 수 없습니다: {model_path}")
 
     # 모델 로드
     print(f"모델 로드 중: {model_path}")
@@ -98,9 +98,9 @@ def evaluate_model(model_path: str, env_name: str, episodes: int = 5, render_vid
 
     print("\n" + "=" * 50)
     print("평가 결과 요약:")
-    print(".2f")
-    print(".2f")
-    print(".1f")
+    print(f"mean_reward : {mean_reward}")
+    print(f"std_reward : {std_reward}")
+    print(f"mean_length : {mean_length}")
     print("=" * 50)
 
     return mean_reward, std_reward, mean_length
