@@ -1,0 +1,71 @@
+# =============================================================================
+# ALRT (Adaptive LLM-Guided Robustness Training) 커리큘럼 설정
+# =============================================================================
+
+enabled: true                    # 커리큘럼 래퍼/콜백 사용 여부
+llm_update_freq: 5               # 몇 에피소드마다 LLM에게 판단 요청할지
+window_size: 15                  # LLM에 전달할 최근 에피소드 집계 크기
+max_plan_horizon: 1000           # 에피소드 길이 상한
+max_stage: 3                     # 난이도 단계 최대값
+initial_stage: 0                 # 시작 단계
+reward_failure_threshold: 0.0    # 이 값 미만이면 실패로 간주
+
+# =============================================================================
+# ALRT 모드 설정
+# =============================================================================
+alrt:
+  # 강건성 평가 주기 (에피소드 단위)
+  robustness_eval_freq: 20
+  # 강건성 평가 시 에피소드 수
+  robustness_eval_episodes: 3
+  
+  # 모드 전환 임계값 (환경별로 조정 필요)
+  # BOOST 모드: 성능이 낮을 때 학습 가속
+  boost_threshold:
+    reward_below_ratio: 0.3      # 목표 보상의 30% 미만이면 BOOST
+    fail_rate_above: 0.5         # 실패율 50% 이상이면 BOOST
+  
+  # PERTURB 모드: 성능이 높을 때 강건성 훈련
+  perturb_threshold:
+    reward_above_ratio: 0.7      # 목표 보상의 70% 이상이면 PERTURB 고려
+    robustness_below: 0.6        # 강건성 점수 60% 미만이면 PERTURB
+    reward_plateau_episodes: 10  # 보상 정체 에피소드 수
+  
+  # 환경별 목표 보상 (대략적인 수렴 보상)
+  target_rewards:
+    HalfCheetah-v4: 8000
+    Hopper-v4: 3000
+    Walker2d-v4: 5000
+    Ant-v4: 6000
+    Humanoid-v4: 6000
+    LunarLanderContinuous-v3: 250
+
+  # BOOST 모드 설정 (학습 가속)
+  boost_config:
+    reward_scale: 1.2            # 보상 스케일링
+    exploration_bonus: 0.1       # 탐험 보너스 계수
+    provide_action_hint: false   # 액션 힌트 제공 여부
+
+  # PERTURB 모드 설정 (강건성 훈련)
+  perturb_config:
+    # 교란 강도 범위 (stage에 따라 스케일링)
+    intensity_by_stage:
+      0: 0.3   # stage 0: 약한 교란
+      1: 0.5   # stage 1: 중간 교란
+      2: 0.7   # stage 2: 강한 교란
+      3: 1.0   # stage 3: 최대 교란
+
+# =============================================================================
+# 안전 클리핑 한계 (LLM 출력이 범위를 넘어가면 여기서 절단)
+# =============================================================================
+safety_clip:
+  obs_noise_std: 0.3
+  obs_dropout: 0.2
+  action_noise_std: 0.3
+  action_scale_min: 0.5
+  action_scale_max: 1.5
+  action_delay_max: 3
+  friction_min: 0.4
+  friction_max: 1.5
+  mass_scale_min: 0.7
+  mass_scale_max: 1.3

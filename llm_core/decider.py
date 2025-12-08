@@ -1,16 +1,34 @@
+"""
+ALRT (Adaptive LLM-Guided Robustness Training) 의사결정 클래스
+- 에이전트 상태 분석
+- BOOST/MAINTAIN/PERTURB 모드 결정
+- 교란/강화 플랜 생성
+"""
+
 import json
+import os
+import re
 import textwrap
-from typing import Any, Dict, List
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional
 
 from vllm import SamplingParams
 from .loader import LLMLoader
 
 
+class ALRTMode(Enum):
+    BOOST = "boost"
+    MAINTAIN = "maintain"
+    PERTURB = "perturb"
+
+
 class LLMDecider:
     """
-    에피소드 집계 요약을 받아 적대적 커리큘럼 플랜(JSON)을 생성하는 클래스
-    vLLM 로더는 그대로 사용하며, mock 모드에서는 안전한 기본 플랜을 반환.
+    ALRT 의사결정 클래스
+    에피소드 통계를 분석하여 BOOST/MAINTAIN/PERTURB 모드 결정
     """
+    
     def __init__(
         self,
         model_name: str,
@@ -22,14 +40,23 @@ class LLMDecider:
         self.mock = mock
         self.prompt_cfg = prompt_cfg or {}
         self.model_name = model_name
-
+        self.current_mode = ALRTMode.MAINTAIN
+        self.decision_history: List[Dict] = []
+        
+        # 로깅 설정
+        self.log_raw = bool(self.prompt_cfg.get("log_raw", False))
+        default_dir = os.path.join(os.path.dirname(__file__), "..", "outputs", "llm_logs")
+        self.log_dir = self.prompt_cfg.get("log_dir") or default_dir
+        if self.log_raw:
+            os.makedirs(self.log_dir, exist_ok=True)
+        
+        # LLM 로드
         if not self.mock:
-            # vLLM 양자화 설정: 8bit만 fp8로 전달, 4bit는 미지원이므로 기본값 유지
             quantization = "fp8" if use_8bit else None
             self.loader = LLMLoader(
                 model_id=model_name,
                 tensor_parallel_size=8,
-                gpu_memory_utilization=0.7,
+                gpu_memory_utilization=0.85,
                 quantization=quantization,
             )
             self.tokenizer, self.model = self.loader.load()
@@ -46,154 +73,389 @@ class LLMDecider:
         safety_clip: Dict[str, float],
         max_horizon: int,
         max_stage: int,
+        alrt_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """
-        요약/스펙/현재 단계 정보를 받아 다음 에피소드 플랜을 생성.
-        """
+        """ALRT 메인 의사결정 함수"""
+        
         if self.mock:
-            return self._mock_plan(max_horizon, max_stage)
-
-        prompt = self._build_prompt(summary, env_spec, stage, max_horizon)
+            return self._mock_plan(summary, max_horizon, max_stage, alrt_config)
+        
+        prompt = self._build_alrt_prompt(summary, env_spec, stage, max_horizon, alrt_config)
+        
+        # Stop 토큰 최소화 - JSON이 완성될 때까지 생성하도록
         sampling_params = SamplingParams(
-            temperature=float(self.prompt_cfg.get("temperature", 0.6)),
+            temperature=float(self.prompt_cfg.get("temperature", 0.4)),
             top_p=float(self.prompt_cfg.get("top_p", 0.9)),
             max_tokens=int(self.prompt_cfg.get("max_length", 512)),
+            # stop 토큰 제거하거나 최소화
         )
-
+        
         try:
             outputs = self.model.generate([prompt], sampling_params)
             text = outputs[0].outputs[0].text
-            return self._parse_and_clip(text, env_spec, safety_clip, max_horizon, max_stage)
+            
+            if self.log_raw:
+                self._log_raw_output(prompt, text)
+            
+            plan = self._parse_and_validate(text, env_spec, safety_clip, max_horizon, max_stage, alrt_config)
+            
+            # 모드 전환 기록
+            new_mode = ALRTMode(plan.get("mode", "maintain"))
+            if new_mode != self.current_mode:
+                print(f"\n[ALRT] 모드 전환: {self.current_mode.value} → {new_mode.value}")
+                print(f"       이유: {plan.get('reasoning', 'N/A')}")
+            self.current_mode = new_mode
+            
+            return plan
+            
         except Exception as e:
             print(f"[Decider Error] {e}")
-            return self._mock_plan(max_horizon, max_stage)
+            return self._mock_plan(summary, max_horizon, max_stage, alrt_config)
 
-    # ---------------- 내부 유틸 ----------------
+    def _build_alrt_prompt(
+        self,
+        summary: Dict[str, Any],
+        env_spec: Dict[str, Any],
+        stage: int,
+        max_horizon: int,
+        alrt_config: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """ALRT용 프롬프트 생성 - 풍부한 컨텍스트 제공"""
+        
+        alrt_config = alrt_config or {}
+        env_name = env_spec.get("env_name", "unknown")
+        target_reward = alrt_config.get("target_rewards", {}).get(env_name, 3000)
+        
+        # 핵심 메트릭 추출
+        mean_reward = summary.get("mean_reward", 0)
+        std_reward = summary.get("std_reward", 0)
+        min_reward = summary.get("min_reward", 0)
+        max_reward = summary.get("max_reward", 0)
+        fail_rate = summary.get("fail_rate", 0)
+        learning_phase = summary.get("learning_phase", "early")
+        reward_trend = summary.get("reward_trend", "unknown")
+        robustness_score = summary.get("robustness_score", 1.0)
+        total_episodes = summary.get("total_episodes", 0)
+        recent_rewards = summary.get("recent_rewards", [])
+        
+        # 최근 에피소드 상세 정보 (LLM이 패턴을 볼 수 있도록)
+        recent_str = ""
+        if recent_rewards:
+            recent_str = "RECENT EPISODE REWARDS (oldest to newest):\n"
+            for i, r in enumerate(recent_rewards):
+                if i > 0:
+                    if r > recent_rewards[i-1]:
+                        marker = "[UP]"
+                    elif r < recent_rewards[i-1]:
+                        marker = "[DOWN]"
+                    else:
+                        marker = "[SAME]"
+                else:
+                    marker = ""
+                recent_str += f"  Episode {total_episodes - len(recent_rewards) + i + 1}: {r:>8.1f} {marker}\n"
+        
+        # 진행 상황 계산
+        reward_ratio = mean_reward / target_reward if target_reward > 0 else 0
+        progress_bar = self._make_progress_bar(reward_ratio)
+        
+        # 모드 결정 힌트 (LLM 가이드용)
+        if mean_reward < target_reward * 0.3 or fail_rate > 0.5 or learning_phase == "early":
+            suggested = "boost"
+            reason_hint = "Agent is struggling or in early phase"
+        elif (mean_reward > target_reward * 0.7 and robustness_score < 0.6) or reward_trend == "plateau":
+            suggested = "perturb"
+            reason_hint = "Agent performing well but needs robustness training"
+        elif reward_trend == "increasing":
+            suggested = "maintain"
+            reason_hint = "Agent is improving, do not interfere"
+        else:
+            suggested = "maintain"
+            reason_hint = "Default to observation mode"
+        
+        prompt = f'''You are an RL training coach for {env_name}. Analyze and decide the training mode.
 
-    def _build_prompt(self, summary: Dict[str, Any], env_spec: Dict[str, Any], stage: int, max_horizon: int) -> str:
-        """
-        프롬프트를 구조화해 길이를 줄이고 재현성을 높인다.
-        """
-        summary_text = json.dumps(summary, ensure_ascii=False, indent=2)
-        env_text = json.dumps(env_spec, ensure_ascii=False, indent=2)
+=== CURRENT STATUS ===
+Total Episodes: {total_episodes}
+Learning Phase: {learning_phase}
+Target Reward: {target_reward}
 
-        return textwrap.dedent(
-            f"""
-            System: 너는 RL 에이전트를 시험하는 적대적 커리큘럼 디자이너다. 현실적 범위 내에서 점진적으로 난이도를 올려라.
-            제안은 항상 JSON 스키마만 반환할 것.
-            
-            [환경 스펙]
-            {env_text}
+Performance:
+  Mean Reward: {mean_reward:>8.1f} ({reward_ratio*100:>5.1f}% of target)
+  Std Reward:  {std_reward:>8.1f}
+  Min/Max:     {min_reward:>8.1f} / {max_reward:>8.1f}
+  Progress:    {progress_bar}
 
-            [현재 단계] {stage}  (0=쉬움, {env_spec.get('max_stage', 3)}=최대 난이도)
-            [에피소드 길이 한계] 0~{max_horizon} 스텝
+Health Indicators:
+  Fail Rate:        {fail_rate*100:>5.1f}%
+  Reward Trend:     {reward_trend}
+  Robustness Score: {robustness_score:.2f} (1.0 = untested, <0.6 = needs training)
 
-            [최근 에피소드 요약]
-            {summary_text}
+{recent_str}
+=== DECISION RULES ===
+BOOST:    mean_reward < {target_reward * 0.3:.0f} OR fail_rate > 50% OR early phase. Help agent learn.
+MAINTAIN: reward_trend == "increasing". Do not interfere with learning.
+PERTURB:  mean_reward > {target_reward * 0.7:.0f} with low robustness, OR plateau. Add perturbations.
 
-            [출력 스키마(JSON)]
-            {{
-              "stage": <int>,
-              "episode_plan": [
-                {{"start":0,"end":300,"type":"obs_noise","target":[0,1],"value":0.05}},
-                {{"start":300,"end":700,"type":"action_delay","value":2}},
-                {{"start":700,"end":{max_horizon},"type":"dyn_shift","params":{{"friction":0.9,"mass_scale":1.05}}}}
-              ],
-              "stage_escalate_if": {{"median_reward_gt": 1800, "fail_rate_lt": 0.1}},
-              "stage_deescalate_if": {{"median_reward_lt": 1200}}
-            }}
+=== YOUR TASK ===
+Suggested mode: {suggested} ({reason_hint})
 
-            type은 다음 중 하나: obs_noise, obs_dropout, action_noise, action_scale, action_delay, dyn_shift, none
-            target은 관측/액션 인덱스 리스트(없으면 전체 적용). 안전/물리 한계를 넘지 말 것.
-            응답은 JSON만 반환하라.
-            """
-        ).strip()
+Output a JSON object with your decision. You may adjust the suggestion if you disagree.
+For BOOST: set reward_scale (1.0-1.5) and exploration_bonus (0.0-0.2)
+For PERTURB: set episode_plan with types: obs_noise, action_noise, action_delay
 
-    def _parse_and_clip(
+Example JSON format:
+{{"mode": "boost", "reasoning": "agent struggling in early phase", "stage": 0, "boost_config": {{"reward_scale": 1.2, "exploration_bonus": 0.1}}, "perturb_config": {{"episode_plan": []}}}}
+
+Your JSON response:'''
+
+        return prompt
+
+    def _make_progress_bar(self, ratio: float, length: int = 20) -> str:
+        """진행률 바 생성"""
+        ratio = max(0, min(1, ratio))
+        filled = int(length * ratio)
+        bar = "█" * filled + "░" * (length - filled)
+        return f"[{bar}] {ratio*100:.1f}%"
+
+    def _parse_and_validate(
         self,
         text: str,
         env_spec: Dict[str, Any],
         safety: Dict[str, float],
         max_horizon: int,
         max_stage: int,
+        alrt_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """LLM 응답을 JSON으로 파싱하고 안전 범위로 클리핑"""
-        plan = self._parse_json(text)
-        if not isinstance(plan, dict):
-            return self._mock_plan(max_horizon, max_stage)
+        """LLM 응답에서 첫 번째 유효한 JSON 추출 및 검증"""
+        
+        # 1. JSON 추출 시도
+        json_obj = self._extract_first_json(text)
+        
+        if json_obj is None:
+            print(f"[ALRT] JSON 파싱 실패, fallback 사용")
+            return self._fallback_plan(max_horizon, max_stage)
+        
+        # 2. 모드 검증
+        mode = json_obj.get("mode", "maintain").lower().strip()
+        if mode not in ["boost", "maintain", "perturb"]:
+            mode = "maintain"
+        
+        result = {
+            "mode": mode,
+            "source": "llm",
+            "reasoning": json_obj.get("reasoning", ""),
+            "stage": min(max(int(json_obj.get("stage", 0)), 0), max_stage),
+        }
+        
+        # 3. 모드별 설정 추출 및 검증
+        if mode == "boost":
+            boost_cfg = json_obj.get("boost_config", {})
+            result["boost_config"] = {
+                "reward_scale": min(max(float(boost_cfg.get("reward_scale", 1.2)), 1.0), 1.5),
+                "exploration_bonus": min(max(float(boost_cfg.get("exploration_bonus", 0.1)), 0.0), 0.2),
+            }
+            result["perturb_config"] = {"episode_plan": []}
+            
+        elif mode == "perturb":
+            perturb_cfg = json_obj.get("perturb_config", {})
+            episode_plan = self._validate_episode_plan(
+                perturb_cfg.get("episode_plan", []),
+                safety, max_horizon
+            )
+            result["perturb_config"] = {"episode_plan": episode_plan}
+            result["boost_config"] = {"reward_scale": 1.0, "exploration_bonus": 0.0}
+            
+        else:  # maintain
+            result["boost_config"] = {"reward_scale": 1.0, "exploration_bonus": 0.0}
+            result["perturb_config"] = {"episode_plan": []}
+        
+        return result
 
-        cleaned = {"episode_plan": []}
-
-        # 단계 정보 클리핑
-        stage = plan.get("stage", 0)
-        cleaned["stage"] = int(min(max(stage, 0), max_stage))
-
-        act_dim = env_spec.get("act_dim")
-        obs_dim = env_spec.get("obs_dim")
-
-        for seg in plan.get("episode_plan", []):
+    def _extract_first_json(self, text: str) -> Optional[Dict]:
+        """텍스트에서 첫 번째 유효한 JSON 객체 추출 (빈 값 무시)"""
+        
+        if not text:
+            return None
+        
+        # 중괄호 매칭으로 JSON 후보 찾기
+        candidates = []
+        stack = []
+        start_idx = None
+        
+        for i, ch in enumerate(text):
+            if ch == "{":
+                if not stack:
+                    start_idx = i
+                stack.append("{")
+            elif ch == "}" and stack:
+                stack.pop()
+                if not stack and start_idx is not None:
+                    candidates.append(text[start_idx:i+1])
+        
+        # 각 후보를 파싱하고, 유효한 값이 있는 것만 반환
+        for candidate in candidates:
             try:
-                start = max(0, int(seg.get("start", 0)))
-                end = min(max_horizon, int(seg.get("end", max_horizon)))
-                if end < start:
-                    end = start
-                attack_type = seg.get("type", "none")
-                target = [int(t) for t in seg.get("target", []) if isinstance(t, (int, float))]
-                target = [t for t in target if t >= 0]
-                value = float(seg.get("value", 0.0))
-                params = seg.get("params", {})
-
-                # 안전 범위 클리핑
-                if attack_type == "obs_noise":
-                    value = min(abs(value), safety.get("obs_noise_std", 0.0))
-                elif attack_type == "obs_dropout":
-                    value = min(max(value, 0.0), safety.get("obs_dropout", 0.0))
-                elif attack_type == "action_noise":
-                    value = min(abs(value), safety.get("action_noise_std", 0.0))
-                elif attack_type == "action_scale":
-                    lo = safety.get("action_scale_min", 1.0)
-                    hi = safety.get("action_scale_max", 1.0)
-                    value = max(lo, min(value, hi))
-                elif attack_type == "action_delay":
-                    value = min(max(0, int(value)), int(safety.get("action_delay_max", 0)))
-                elif attack_type == "dyn_shift":
-                    params = {
-                        "friction": max(safety.get("friction_min", 0.0), min(params.get("friction", 1.0), safety.get("friction_max", 1.0))),
-                        "mass_scale": max(safety.get("mass_scale_min", 1.0), min(params.get("mass_scale", 1.0), safety.get("mass_scale_max", 1.0))),
-                    }
-
-                cleaned["episode_plan"].append(
-                    {"start": start, "end": end, "type": attack_type, "target": target, "value": value, "params": params}
-                )
-            except Exception:
-                # 잘못된 세그먼트는 무시
+                fixed = self._fix_incomplete_json(candidate)
+                obj = json.loads(fixed)
+                
+                if not isinstance(obj, dict):
+                    continue
+                
+                # "mode" 키가 있고, 값이 유효한지 확인
+                mode = obj.get("mode", "")
+                if not mode or not mode.strip():
+                    continue  # 빈 mode는 스킵
+                
+                # mode가 유효한 값인지 확인
+                if mode.lower().strip() in ["boost", "maintain", "perturb"]:
+                    return obj
+                    
+            except:
                 continue
-
-        cleaned["stage_escalate_if"] = plan.get("stage_escalate_if", {})
-        cleaned["stage_deescalate_if"] = plan.get("stage_deescalate_if", {})
-
-        return cleaned if cleaned["episode_plan"] else self._mock_plan(max_horizon, max_stage)
-
-    def _parse_json(self, text: str) -> Any:
-        """대괄호/중괄호 위치를 찾아 JSON 부분만 파싱"""
-        try:
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            if start != -1 and end != -1:
-                return json.loads(text[start:end])
-        except Exception:
-            pass
+        
+        # 유효한 JSON을 못 찾은 경우
         return None
 
-    def _mock_plan(self, max_horizon: int, max_stage: int) -> Dict[str, Any]:
-        """LLM 없이도 파이프라인을 테스트하기 위한 안전 플랜"""
-        mid = max_horizon // 2
+    def _fix_incomplete_json(self, text: str) -> str:
+        """불완전한 JSON 수정 시도"""
+        text = text.strip()
+        
+        # 끝나지 않은 문자열 닫기
+        if text.count('"') % 2 == 1:
+            text += '"'
+        
+        # 닫히지 않은 괄호 닫기
+        open_braces = text.count('{') - text.count('}')
+        open_brackets = text.count('[') - text.count(']')
+        
+        if open_brackets > 0:
+            text += ']' * open_brackets
+        if open_braces > 0:
+            text += '}' * open_braces
+        
+        return text
+
+    def _validate_episode_plan(
+        self,
+        plan: List[Dict],
+        safety: Dict[str, float],
+        max_horizon: int,
+    ) -> List[Dict]:
+        """episode_plan 검증 및 안전 범위 클리핑"""
+        
+        validated = []
+        for seg in plan:
+            try:
+                attack_type = seg.get("type", "none")
+                if attack_type == "none":
+                    continue
+                
+                start = max(0, int(seg.get("start", 0)))
+                end = min(max_horizon, int(seg.get("end", max_horizon)))
+                if end <= start:
+                    continue
+                
+                value = float(seg.get("value", 0.0))
+                target = seg.get("target", [])
+                
+                # 안전 범위 클리핑
+                if attack_type == "obs_noise":
+                    value = min(abs(value), safety.get("obs_noise_std", 0.3))
+                elif attack_type == "action_noise":
+                    value = min(abs(value), safety.get("action_noise_std", 0.3))
+                elif attack_type == "action_delay":
+                    value = min(max(0, int(value)), int(safety.get("action_delay_max", 3)))
+                elif attack_type == "obs_dropout":
+                    value = min(max(0, value), safety.get("obs_dropout", 0.2))
+                
+                validated.append({
+                    "start": start,
+                    "end": end,
+                    "type": attack_type,
+                    "target": target if isinstance(target, list) else [],
+                    "value": value,
+                })
+            except:
+                continue
+        
+        return validated
+
+    def _fallback_plan(self, max_horizon: int, max_stage: int) -> Dict[str, Any]:
+        """파싱 실패 시 기본 플랜"""
         return {
-            "stage": 1,
-            "episode_plan": [
-                {"start": 0, "end": mid, "type": "obs_noise", "target": [], "value": 0.05},
-                {"start": mid, "end": max_horizon, "type": "action_noise", "target": [], "value": 0.1},
-            ],
-            "stage_escalate_if": {"median_reward_gt": 1800, "fail_rate_lt": 0.1},
-            "stage_deescalate_if": {"median_reward_lt": 1200},
+            "mode": "maintain",
+            "source": "fallback",
+            "reasoning": "JSON parsing failed, defaulting to maintain",
+            "stage": 0,
+            "boost_config": {"reward_scale": 1.0, "exploration_bonus": 0.0},
+            "perturb_config": {"episode_plan": []},
         }
+
+    def _mock_plan(
+        self,
+        summary: Dict[str, Any],
+        max_horizon: int,
+        max_stage: int,
+        alrt_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Mock 모드: 규칙 기반 의사결정"""
+        
+        alrt_config = alrt_config or {}
+        mean_reward = summary.get("mean_reward", 0)
+        fail_rate = summary.get("fail_rate", 0)
+        learning_phase = summary.get("learning_phase", "early")
+        reward_trend = summary.get("reward_trend", "unknown")
+        robustness_score = summary.get("robustness_score", 1.0)
+        target_reward = summary.get("target_reward", 3000)
+        
+        # 규칙 기반 모드 결정
+        if mean_reward < target_reward * 0.3 or fail_rate > 0.5 or learning_phase == "early":
+            mode = "boost"
+            reasoning = f"Agent struggling (reward={mean_reward:.0f}, fail_rate={fail_rate:.1%})"
+            boost_config = {"reward_scale": 1.2, "exploration_bonus": 0.1}
+            perturb_config = {"episode_plan": []}
+            
+        elif (mean_reward > target_reward * 0.7 and robustness_score < 0.6) or reward_trend == "plateau":
+            mode = "perturb"
+            reasoning = f"Agent ready for robustness training (robustness={robustness_score:.2f})"
+            boost_config = {"reward_scale": 1.0, "exploration_bonus": 0.0}
+            # 점진적 교란 플랜
+            mid = max_horizon // 2
+            perturb_config = {
+                "episode_plan": [
+                    {"start": 0, "end": mid, "type": "obs_noise", "target": [], "value": 0.1},
+                    {"start": mid, "end": max_horizon, "type": "action_noise", "target": [], "value": 0.08},
+                ]
+            }
+        else:
+            mode = "maintain"
+            reasoning = f"Agent learning well (trend={reward_trend})"
+            boost_config = {"reward_scale": 1.0, "exploration_bonus": 0.0}
+            perturb_config = {"episode_plan": []}
+        
+        return {
+            "mode": mode,
+            "source": "mock",
+            "reasoning": reasoning,
+            "stage": 0,
+            "boost_config": boost_config,
+            "perturb_config": perturb_config,
+        }
+
+    def _log_raw_output(self, prompt: str, raw: str) -> None:
+        """LLM 입출력 로깅"""
+        parsed = self._extract_first_json(raw)
+        pretty = json.dumps(parsed, ensure_ascii=False, indent=2) if parsed else raw
+        
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = os.path.join(self.log_dir, f"llm_output_{stamp}.txt")
+        
+        with open(fname, "w", encoding="utf-8") as f:
+            f.write("=== PROMPT ===\n")
+            f.write(prompt)
+            f.write("\n\n=== RAW OUTPUT ===\n")
+            f.write(raw)
+            f.write("\n\n=== PARSED ===\n")
+            f.write(pretty)
+        
+        print(f"\n[LLM] Mode decision logged to {fname}")

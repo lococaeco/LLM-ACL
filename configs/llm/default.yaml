@@ -27,3 +27,6 @@ top_k: 50
 
 # 탑-p 샘플링
 top_p: 0.9
+
+log_raw: true           # LLM 출력 로깅 여부
+log_dir: "outputs/llm_logs"  # 저장 경로 (없으면 위 디폴트 경로 사용)

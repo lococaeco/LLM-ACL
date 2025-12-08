@@ -1,26 +1,26 @@
 """
-RL 에이전트 학습 스크립트
-Hydra 설정을 불러와 LLM 커리큘럼 기반 강건 학습을 수행.
+ALRT (Adaptive LLM-Guided Robustness Training) 학습 스크립트
+Hydra 설정을 불러와 적응형 LLM 커리큘럼 기반 강건 학습을 수행.
 """
 
 import os
 import datetime
 import hydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from stable_baselines3 import SAC, PPO, TD3, A2C
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
 import wandb
 
-from rl_modules.utils import make_env, get_env_spec
-from rl_modules.custom_wrappers import CurriculumEnvWrapper
-from rl_modules.custom_callbacks import LLMCurriculumCallback, WandbLoggingCallback, ProgressCallback
+from rl_modules.utils import make_env, get_env_spec, get_target_reward
+from rl_modules.custom_wrappers import AdaptiveCurriculumWrapper, ALRTEnvWrapper
+from rl_modules.custom_callbacks import ALRTCallback, WandbLoggingCallback, ProgressCallback
 from llm_core.decider import LLMDecider
 
 
 @hydra.main(config_path="../configs", config_name="config", version_base=None)
 def train(cfg: DictConfig) -> None:
     """Hydra 진입점"""
-    # wandb 로그인 (보안을 위해 key를 환경변수로 관리 권장)
+    # wandb 로그인
     sangwoo = "7c6164675504dd1412328d937442bc75fb380454"
     wandb.login(key=sangwoo)
 
@@ -31,22 +31,35 @@ def train(cfg: DictConfig) -> None:
     exp_dir = os.path.join(outputs_dir, cfg.env.env_name, cfg.agent.algorithm, timestamp)
     os.makedirs(exp_dir, exist_ok=True)
 
-    run_name = f"{cfg.agent.algorithm}_{cfg.env.env_name}_{'curriculum' if cfg.llm_enabled else 'baseline'}"
+    # 실험 모드 결정
+    if cfg.llm_enabled:
+        mode = "ALRT" if not cfg.llm.mock else "ALRT-mock"
+    else:
+        mode = "baseline"
+
+    run_name = f"{cfg.agent.algorithm}_{cfg.env.env_name}_{mode}"
     wandb.init(
         entity="sangwoo6999-unist",
         project="dl-project-llm-robuster",
         name=run_name,
-        tags=[cfg.agent.algorithm, cfg.env.env_name, "curriculum" if cfg.llm_enabled else "baseline"],
-        config=dict(cfg),
+        tags=[cfg.agent.algorithm, cfg.env.env_name, mode],
+        config=OmegaConf.to_container(cfg, resolve=True),
     )
 
     # 환경 생성 및 스펙 추출
     base_env = make_env(cfg.env.env_name, cfg.env.render_mode, cfg.env.max_episode_steps)
     env_spec = get_env_spec(cfg.env.env_name, base_env)
 
-    # 커리큘럼 래퍼 적용
+    # 평가용 환경 생성 함수 (강건성 테스트용)
+    def make_eval_env():
+        return make_env(cfg.env.env_name, None, cfg.env.max_episode_steps)
+
+    # 목표 보상 설정
+    target_reward = get_target_reward(cfg.env.env_name, cfg.curriculum)
+
+    # 적응형 커리큘럼 래퍼 적용
     if cfg.curriculum.enabled:
-        train_env = CurriculumEnvWrapper(
+        train_env = ALRTEnvWrapper(
             env=base_env,
             max_episode_steps=cfg.env.max_episode_steps,
             safety_clip=dict(cfg.curriculum.safety_clip),
@@ -54,7 +67,7 @@ def train(cfg: DictConfig) -> None:
     else:
         train_env = base_env
 
-    # LLM 디사이더 준비 (llm_enabled가 False이거나 mock=True면 mock 플랜 사용)
+    # LLM 디사이더 준비
     llm_decider = LLMDecider(
         model_name=cfg.llm.model_name,
         use_4bit=cfg.llm.use_4bit,
@@ -63,14 +76,17 @@ def train(cfg: DictConfig) -> None:
         prompt_cfg=dict(cfg.llm),
     )
 
-    # 커리큘럼 콜백
-    curriculum_callback = None
+    # ALRT 콜백
+    alrt_callback = None
     if cfg.curriculum.enabled:
-        curriculum_callback = LLMCurriculumCallback(
+        alrt_callback = ALRTCallback(
             wrapper=train_env,
             llm_decider=llm_decider,
             curriculum_cfg=cfg.curriculum,
             env_spec=env_spec,
+            base_env_fn=make_eval_env,
+            target_reward=target_reward,
+            total_timesteps=cfg.total_timesteps,
             use_llm=cfg.llm_enabled and not cfg.llm.mock,
             verbose=1,
         )
@@ -83,11 +99,15 @@ def train(cfg: DictConfig) -> None:
         verbose=1,
     )
     wandb_logging_callback = WandbLoggingCallback(log_freq=cfg.log_interval, verbose=1)
-    progress_callback = ProgressCallback(total_timesteps=cfg.total_timesteps, update_freq=cfg.log_interval, verbose=1)
+    progress_callback = ProgressCallback(
+        total_timesteps=cfg.total_timesteps, 
+        update_freq=cfg.log_interval, 
+        verbose=1
+    )
 
     callbacks = [checkpoint_callback, wandb_logging_callback, progress_callback]
-    if curriculum_callback:
-        callbacks.append(curriculum_callback)
+    if alrt_callback:
+        callbacks.append(alrt_callback)
     callback_list = CallbackList(callbacks)
 
     # 알고리즘 선택
@@ -102,15 +122,30 @@ def train(cfg: DictConfig) -> None:
     model_kwargs["device"] = cfg.device
     model = agent_class("MlpPolicy", train_env, **model_kwargs)
 
-    mode_desc = "LLM 커리큘럼" if cfg.llm_enabled else "베이스라인"
-    print(f"\n[{algorithm_name.upper()}] 학습 시작 | 모드: {mode_desc}")
+    print(f"\n{'='*60}")
+    print(f"[ALRT] 학습 시작")
+    print(f"  - 알고리즘: {algorithm_name.upper()}")
+    print(f"  - 환경: {cfg.env.env_name}")
+    print(f"  - 모드: {mode}")
+    print(f"  - 목표 보상: {target_reward}")
+    print(f"  - 총 스텝: {cfg.total_timesteps:,}")
+    print(f"{'='*60}\n")
 
     try:
         model.learn(total_timesteps=cfg.total_timesteps, callback=callback_list)
-        print("학습이 완료되었습니다.")
+        print("\n학습이 완료되었습니다.")
+        
+        # 최종 모델 저장
         final_model_path = os.path.join(exp_dir, "final_model")
         model.save(final_model_path)
         print(f"최종 모델 저장 완료: {final_model_path}")
+        
+        # 최종 강건성 평가
+        if alrt_callback:
+            print("\n[ALRT] 최종 강건성 평가 중...")
+            alrt_callback._evaluate_robustness()
+            print(f"최종 강건성 점수: {alrt_callback.last_robustness_score:.2f}")
+            
     except Exception as e:
         print(f"학습 중 오류 발생: {e}")
         raise e
