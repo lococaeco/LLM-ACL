@@ -8,13 +8,13 @@ set -euo pipefail
 export PYTHONPATH="/home/mlic/mingukang/DL_Project:$PYTHONPATH"
 
 # GPU 설정 (필요시 변경: 0, 1, 또는 all)
-export CUDA_VISIBLE_DEVICES=4,5
+export CUDA_VISIBLE_DEVICES=0
 
 echo "=== 베이스라인 RL 학습 시작 ==="
 
 # LunarLander 환경에서 각 알고리즘 학습
-echo "5. SAC 알고리즘 - LunarLanderContinuous-v3"
-python rl_modules/train.py agent=sac env=lunarlander llm_enabled=false
+# echo "5. SAC 알고리즘 - LunarLanderContinuous-v3"
+# python rl_modules/train.py agent=sac env=lunarlander llm_enabled=false
 
 echo "6. PPO 알고리즘 - LunarLanderContinuous-v3"
 python rl_modules/train.py agent=ppo env=lunarlander llm_enabled=false
