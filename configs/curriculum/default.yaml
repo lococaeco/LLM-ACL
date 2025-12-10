@@ -33,7 +33,7 @@ alrt:
   
   # 환경별 목표 보상 (대략적인 수렴 보상)
   target_rewards:
-    HalfCheetah-v4: 8000
+    HalfCheetah-v4: 16000
     Hopper-v4: 3000
     Walker2d-v4: 5000
     Ant-v4: 6000
