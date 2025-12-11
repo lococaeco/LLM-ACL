@@ -35,7 +35,7 @@ for env in "${environments[@]}"; do
             gpu=${gpus[$i]}
             
             echo "$model 알고리즘 - $env (GPU $gpu, 시드 $seed)"
-            CUDA_VISIBLE_DEVICES=$gpu python rl_modules/train.py agent=$model env=$env llm_enabled=false seed=$seed &
+            CUDA_VISIBLE_DEVICES=$gpu python rl_modules/train.py agent=$model env=$env llm_enabled=false adr.enabled=true seed=$seed &
         done
 
         # 현재 모델의 모든 시드 학습 완료 대기
