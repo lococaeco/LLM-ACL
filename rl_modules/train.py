@@ -34,6 +34,8 @@ def train(cfg: DictConfig) -> None:
     # 실험 모드 결정
     if cfg.llm_enabled:
         mode = "ALRT" if not cfg.llm.mock else "ALRT-mock"
+    elif cfg.get("adr", {}).get("enabled", False):
+        mode = "ADR"
     else:
         mode = "baseline"
 
