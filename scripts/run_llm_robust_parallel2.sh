@@ -10,7 +10,7 @@ export PYTHONPATH="/home/mlic/mingukang/DL_Project:${PYTHONPATH:-}"
 echo "=== 베이스라인 RL 학습 시작 (시드 병렬 처리) ==="
 
 # 실험 설정
-algorithms=("td3")
+algorithms=("a2c")
 seeds=(1 123 456 789)
 
 # 작업 실행 함수
@@ -50,7 +50,7 @@ for algo in "${algorithms[@]}"; do
     echo "--- 환경 배치: $env (GPU 0-3) ---"
     for i in "${!seeds[@]}"; do
         seed=${seeds[$i]}
-        gpu=$((0 + i))  # 0, 1, 2, 3
+        gpu=$((4 + i))  # 0, 1, 2, 3
         
         run_job "$algo" "$env" "$seed" "$gpu" &
         pid=$!

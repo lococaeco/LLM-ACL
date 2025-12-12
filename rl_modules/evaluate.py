@@ -79,16 +79,29 @@ def evaluate_model(
         print("강건성 테스트")
         print(f"{'='*60}")
         
-        robustness_results = evaluate_robustness(model, env_name, episodes)
+        robustness_results = evaluate_robustness(model, env_name, episodes, normal_rewards)
         
         print(f"\n[강건성 결과 요약]")
-        print(f"  정상 환경: {np.mean(normal_rewards):.2f}")
+        normal_mean = np.mean(normal_rewards)
+        print(f"  정상 환경 점수: {normal_mean:.2f}")
+        
+        ratios = []
+        scenario_scores = []
         for scenario, rewards in robustness_results.items():
-            ratio = np.mean(rewards) / np.mean(normal_rewards) if np.mean(normal_rewards) > 0 else 0
-            print(f"  {scenario}: {np.mean(rewards):.2f} (성능 비율: {ratio:.2%})")
+            scenario_mean = np.mean(rewards)
+            scenario_scores.append(scenario_mean)
+            ratio = scenario_mean / normal_mean if normal_mean > 0 else 0
+            print(f"  {scenario}: {scenario_mean:.2f} (비율: {ratio:.1%})")
+            ratios.append(ratio)
+        
+        avg_robustness_raw = np.mean(scenario_scores)
+        robustness_score = np.mean(ratios)
+        
+        print(f"  강건성 환경 평균 점수: {avg_robustness_raw:.2f}")
+        print(f"  종합 강건성 점수: {robustness_score:.1%}")
 
 
-def evaluate_robustness(model, env_name: str, episodes: int = 5) -> dict:
+def evaluate_robustness(model, env_name: str, episodes: int = 5, normal_rewards: list = None) -> dict:
     """다양한 교란 시나리오에서 모델 평가"""
     
     perturbation_scenarios = {
