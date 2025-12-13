@@ -1,12 +1,15 @@
-# LLM 기반 RL 에이전트 Robustness 제어 프로젝트
+# LLM 기반 RL 에이전트 Robustness 제어 프로젝트 (ALRT)
 
-이 프로젝트는 Large Language Model(LLM)을 활용하여 Reinforcement Learning(RL) 에이전트의 Robustness를 동적으로 제어하는 연구를 위한 코드베이스입니다. Action Dimension Dropout과 환경 노이즈 등의 기법을 LLM의 지도하에 적용하여 에이전트의 안정성과 적응성을 향상시키는 것을 목표로 합니다.
+이 프로젝트는 Large Language Model(LLM)을 활용하여 Reinforcement Learning(RL) 에이전트의 Robustness를 동적으로 제어하는 연구를 위한 코드베이스입니다. **ALRT (Adaptive LLM-Guided Robustness Training)** 프레임워크를 통해 에이전트의 학습 상태를 분석하고, 적절한 시점에 환경 교란(Perturbation)이나 보상 강화(Boost)를 적용하여 에이전트의 안정성과 적응성을 향상시키는 것을 목표로 합니다.
 
 ## 주요 기능
 
 - **다양한 RL 알고리즘 지원**: SAC, PPO, TD3, A2C 알고리즘 구현
-- **LLM 통합**: HuggingFace Transformers 기반 LLM 로드 및 추론
-- **동적 Robustness 제어**: 학습 중 LLM이 에이전트 상태를 분석하여 Action Dropout Mask 결정
+- **LLM 통합**: HuggingFace Transformers 및 vLLM 기반 LLM 로드 및 추론
+- **동적 커리큘럼 제어 (ALRT)**:
+  - **BOOST 모드**: 학습 정체 시 보상 스케일링 및 탐험 보너스 제공
+  - **MAINTAIN 모드**: 안정적인 학습을 위해 기본 환경 유지
+  - **PERTURB 모드**: 강건성 향상을 위해 관측/행동 노이즈, 지연(Delay), 동역학 변화 등 다양한 교란 적용
 - **양자화 지원**: 4bit/8bit 양자화로 GPU 메모리 효율성 향상
 - **모의 모드**: LLM 없이 테스트 가능한 모의 모드 제공
 
@@ -195,14 +198,16 @@ python rl_modules/train.py llm.temperature=0.8 llm.max_length=256
 ### LLM 설정 (`configs/llm/`)
 - `default.yaml`: 기본 LLM 설정 (모델, 양자화, 모의 모드 등)
 
-## 연구 방법론
+## 연구 방법론 (ALRT 프레임워크)
 
-1. **베이스라인 측정**: LLM 없이 표준 RL 알고리즘의 성능 측정
-2. **LLM 통합**: 학습 중 주기적으로 LLM에 상태 정보를 전달
-3. **마스크 결정**: LLM이 현재 학습 상태를 분석하여 Action Dropout Mask 생성
-4. **동적 적용**: 결정된 마스크를 실시간으로 에이전트 행동에 적용
+1. **에이전트 상태 분석**: LLM이 최근 에피소드의 보상, 길이, 성공 여부 등을 분석
+2. **모드 결정**:
+   - **BOOST**: 성능이 정체되거나 초기 학습 단계일 때, 보상 스케일링이나 탐험 보너스를 통해 학습 촉진
+   - **MAINTAIN**: 학습이 안정적으로 진행 중일 때, 현재 환경 설정을 유지
+   - **PERTURB**: 에이전트가 충분히 숙련되었을 때, 다양한 노이즈(Action/Observation Noise, Delay, Dynamics Shift)를 주입하여 강건성 훈련
+3. **플랜 생성 및 적용**: 결정된 모드에 따라 구체적인 파라미터(노이즈 크기, 지연 시간 등)를 포함한 플랜을 생성하고 환경 래퍼(`ALRTEnvWrapper`)에 적용
+4. **반복적 개선**: 학습 과정 동안 주기적으로 이 과정을 반복하여 점진적으로 더 강건한 에이전트 육성
 5. **실험 추적**: Weights & Biases를 통한 학습 메트릭 및 모델 버전 관리
-6. **성능 비교**: Robustness 향상 효과 정량적 평가
 
 ## 모델 저장 및 결과 관리
 
