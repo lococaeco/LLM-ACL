@@ -46,7 +46,7 @@ for algo in "${algorithms[@]}"; do
     pids=()
 
     # 1. Humanoid (GPU 0-3)
-    env="humanoid"
+    env="hopper"
     echo "--- 환경 배치: $env (GPU 0-3) ---"
     for i in "${!seeds[@]}"; do
         seed=${seeds[$i]}
