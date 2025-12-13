@@ -102,6 +102,17 @@ python rl_modules/evaluate.py --model_path outputs/HalfCheetah-v4/sac/20251205_1
 bash scripts/evaluate_model.sh --model_path outputs/HalfCheetah-v4/sac/20251205_120000/final_model.zip --env_name HalfCheetah-v4 --render_video
 ```
 
+### 4. 사전 학습된 모델 평가 (Reproducibility)
+
+사전 학습된 모델의 `outputs` 폴더를 다운로드하여 전체 모델을 평가할 수 있습니다.
+
+1. [Google Drive 링크](https://drive.google.com/drive/folders/1oN9elESMlFl-4YLPkM7gSjdrVAxKMnQ2?usp=sharing)에서 `outputs` 폴더를 다운로드하여 프로젝트 루트 경로에 위치시킵니다.
+2. 아래 스크립트를 실행하여 모든 모델에 대한 평가를 수행합니다.
+
+```bash
+python scripts/evaluate_all_models.py
+```
+
 ## GPU 사용 설정
 
 ### 자동 GPU 할당 (권장)
