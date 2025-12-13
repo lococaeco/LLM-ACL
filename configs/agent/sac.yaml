@@ -1,0 +1,29 @@
+# SAC (Soft Actor-Critic) 에이전트 설정
+# 기본 하이퍼파라미터 값들
+
+# 알고리즘 이름
+algorithm: "sac"
+
+# 학습률
+learning_rate: 3e-4
+
+# 리플레이 버퍼 크기
+buffer_size: 1000000
+
+# 학습 시작 스텝
+learning_starts: 100
+
+# 배치 크기
+batch_size: 256
+
+# 소프트 업데이트 계수
+tau: 0.005
+
+# 할인 계수
+gamma: 0.99
+
+# 엔트로피 계수 (자동 조정)
+ent_coef: "auto"
+
+# 타겟 엔트로피 (자동 조정)
+target_entropy: "auto"

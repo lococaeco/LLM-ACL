@@ -1,0 +1,17 @@
+# LunarLander 환경 설정
+# 기본 환경 파라미터
+
+# 환경 이름
+env_name: "LunarLanderContinuous-v3"
+
+# 렌더링 모드 (학습 시 null, 시각화 시 "human")
+render_mode: null
+
+# 최대 에피소드 길이
+max_episode_steps: 1000
+
+# 노이즈 추가 여부 (Robustness 연구용)
+add_noise: false
+
+# 액션 차원 드롭아웃 비율 (Robustness 연구용)
+action_dropout_rate: 0.0

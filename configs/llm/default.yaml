@@ -1,0 +1,32 @@
+# LLM 기본 설정
+# 추후 Robustness 제어에 사용 예정
+
+# 모델 이름
+model_name: "gpt-2"
+
+# 4bit 양자화 사용
+use_4bit: false
+
+# 8bit 양자화 사용
+use_8bit: false
+
+# 모의 모드 (LLM 없이 테스트용)
+mock: false
+
+# 디바이스 설정
+device: "auto"
+
+# 최대 토큰 길이
+max_length: 512
+
+# 온도 파라미터
+temperature: 0.7
+
+# 탑-k 샘플링
+top_k: 50
+
+# 탑-p 샘플링
+top_p: 0.9
+
+log_raw: true           # LLM 출력 로깅 여부
+log_dir: "outputs/llm_logs"  # 저장 경로 (없으면 위 디폴트 경로 사용)
