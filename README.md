@@ -1,12 +1,12 @@
-# LLM 기반 RL 에이전트 Robustness 제어 프로젝트 (ALRT)
+# LLM 기반 RL 에이전트 Robustness 제어 프로젝트 (LLM-ACL)
 
-이 프로젝트는 Large Language Model(LLM)을 활용하여 Reinforcement Learning(RL) 에이전트의 Robustness를 동적으로 제어하는 연구를 위한 코드베이스입니다. **ALRT (Adaptive LLM-Guided Robustness Training)** 프레임워크를 통해 에이전트의 학습 상태를 분석하고, 적절한 시점에 환경 교란(Perturbation)이나 보상 강화(Boost)를 적용하여 에이전트의 안정성과 적응성을 향상시키는 것을 목표로 합니다.
+이 프로젝트는 Large Language Model(LLM)을 활용하여 Reinforcement Learning(RL) 에이전트의 Robustness를 동적으로 제어하는 연구를 위한 코드베이스입니다. **LLM-ACL (LLM-Adaptive Curriculum Learning)** 프레임워크를 통해 에이전트의 학습 상태를 분석하고, 적절한 시점에 환경 교란(Perturbation)이나 보상 강화(Boost)를 적용하여 에이전트의 안정성과 적응성을 향상시키는 것을 목표로 합니다.
 
 ## 주요 기능
 
 - **다양한 RL 알고리즘 지원**: SAC, PPO, TD3, A2C 알고리즘 구현
 - **LLM 통합**: HuggingFace Transformers 및 vLLM 기반 LLM 로드 및 추론
-- **동적 커리큘럼 제어 (ALRT)**:
+- **동적 커리큘럼 제어 (LLM-ACL)**:
   - **BOOST 모드**: 학습 정체 시 보상 스케일링 및 탐험 보너스 제공
   - **MAINTAIN 모드**: 안정적인 학습을 위해 기본 환경 유지
   - **PERTURB 모드**: 강건성 향상을 위해 관측/행동 노이즈, 지연(Delay), 동역학 변화 등 다양한 교란 적용
@@ -198,7 +198,7 @@ python rl_modules/train.py llm.temperature=0.8 llm.max_length=256
 ### LLM 설정 (`configs/llm/`)
 - `default.yaml`: 기본 LLM 설정 (모델, 양자화, 모의 모드 등)
 
-## 연구 방법론 (ALRT 프레임워크)
+## 연구 방법론 (LLM-ACL 프레임워크)
 
 1. **에이전트 상태 분석**: LLM이 최근 에피소드의 보상, 길이, 성공 여부 등을 분석
 2. **모드 결정**:
