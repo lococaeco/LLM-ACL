@@ -2,6 +2,12 @@
 
 이 프로젝트는 Large Language Model(LLM)을 활용하여 Reinforcement Learning(RL) 에이전트의 Robustness를 동적으로 제어하는 연구를 위한 코드베이스입니다. **LLM-ACL (LLM-Adaptive Curriculum Learning)** 프레임워크를 통해 에이전트의 학습 상태를 분석하고, 적절한 시점에 환경 교란(Perturbation)이나 보상 강화(Boost)를 적용하여 에이전트의 안정성과 적응성을 향상시키는 것을 목표로 합니다.
 
+## 보고서 다운로드
+
+본 프로젝트의 상세한 연구 내용과 실험 결과는 아래 논문/보고서 파일에서 확인하실 수 있습니다.
+
+- [LLM-ACL: Large Language Model-Guided Adversarial Curriculum Learning for Robust Reinforcement Learning (PDF)](./LLM-ACL: Large Language Model-Guided Adversarial Curriculum Learning for Robust Reinforcement Learning.pdf)
+
 ## 주요 기능
 
 - **다양한 RL 알고리즘 지원**: SAC, PPO, TD3, A2C 알고리즘 구현
